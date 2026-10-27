@@ -1,0 +1,567 @@
+<!--
+
+  Developed by Yusuf Furkan Umutlu
+
+  https://github.com/yufurkan
+
+  Open Source
+
+-->
+  
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pixel Submarine Simulation</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+/* Keep the canvas crisp and fill the entire browser window. */
+html, body {
+    margin: 0;
+    height: 100%;
+    background: #0d1536;
+    overflow: hidden;
+}
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    image-rendering: pixelated;
+}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+// Set up the drawing surface and the fixed pixel-art height.
+const canvas = document.getElementById('canvas'),
+      ctx = canvas.getContext('2d'),
+      BASE_HEIGHT = 200;
+let canvasWidth = 356;
+
+// Resize the canvas while preserving its pixel-art proportions.
+function updateSize() {
+    canvasWidth = Math.round(BASE_HEIGHT * innerWidth / innerHeight);
+    canvas.width = canvasWidth;
+    canvas.height = BASE_HEIGHT;
+    ctx.imageSmoothingEnabled = false;
+}
+updateSize();
+addEventListener('resize', updateSize);
+
+// Generate repeatable pseudo-random values for stable scene details.
+const pseudoRandom = (a, b, d) => {
+    let h = Math.sin(a * 127.1 + b * 311.7 + d * 74.7) * 43758.5453;
+    return h - Math.floor(h);
+};
+
+// Small color helpers used throughout the rendering pipeline.
+const hexToRgb = hex => [1, 3, 5].map(i => parseInt(hex.substr(i, 2), 16));
+const mixColors = (a, b, t) => a.map((v, i) => v + (b[i] - v) * t);
+const toRgbaCss = (c, a = 1) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// Key sky colors define the transitions from night to day and back.
+const COLOR_KEYS = [
+    [0, '#070b22', '#16204a'],
+    [0.2, '#0d1536', '#2a2f66'],
+    [0.26, '#4a3a7c', '#f08a63'],
+    [0.34, '#5b86c8', '#f3c6a0'],
+    [0.45, '#4a8fd6', '#aed8f0'],
+    [0.55, '#4a8fd6', '#aed8f0'],
+    [0.66, '#5b6fb8', '#f3b88a'],
+    [0.74, '#7a4a9a', '#f07a62'],
+    [0.82, '#2a2658', '#6a3f7a'],
+    [0.9, '#0d1536', '#2a2f66'],
+    [1, '#070b22', '#16204a']
+].map(k => [k[0], hexToRgb(k[1]), hexToRgb(k[2])]);
+
+// Blend between neighboring sky color keys for the current time of day.
+function getSkyColors(t) {
+    for (let i = 1; i < COLOR_KEYS.length; i++) {
+        if (t <= COLOR_KEYS[i][0]) {
+            const prev = COLOR_KEYS[i - 1], next = COLOR_KEYS[i], factor = (t - prev[0]) / (next[0] - prev[0]);
+            return { top: mixColors(prev[1], next[1], factor), bot: mixColors(prev[2], next[2], factor) };
+        }
+    }
+    return { top: COLOR_KEYS[0][1], bot: COLOR_KEYS[0][2] };
+}
+
+// Scene dimensions and timing controls.
+const HORIZON = 90;
+const BASE_WAVE_HEIGHTS = Array.from({length: 16}, (_, l) => 90 + 105 * Math.pow(l / 15, 1.5));
+const DAY_DURATION = 300;
+
+let totalTime = 0, timeOfDay = 0.7, stormIntensity = 0, targetIntensity = 0.1, nextWeather = 20, lightningFlash = 0, lightningX = 0, dayCount = 1;
+// Pre-build clouds and stars so their positions remain stable.
+const clouds = Array.from({length: 18}, (_, i) => ({ x: pseudoRandom(i, 1, 1) * 500 - 60, y: 10 + pseudoRandom(i, 2, 1) * 55, speed: 0.5 + pseudoRandom(i, 3, 1), scale: 0.6 + pseudoRandom(i, 4, 1) * 1.1 }));
+const stars = Array.from({length: 70}, (_, i) => [pseudoRandom(i, 5, 5) * 500, pseudoRandom(i, 6, 5) * (HORIZON - 8)]);
+
+// Draw the submarine once to an off-screen canvas and reuse the sprite.
+const spriteCanvas = document.createElement('canvas');
+spriteCanvas.width = 225;
+spriteCanvas.height = 64;
+const spriteCtx = spriteCanvas.getContext('2d');
+
+// Map the weather level to a smooth wave speed.
+const getSpeed = w => {
+    const speeds = [0.5, 0.85, 1.35, 2, 2.9];
+    const index = Math.max(0, Math.min(3, Math.floor(w - 1)));
+    const frac = Math.max(0, Math.min(1, w - 1 - index));
+    return speeds[index] + (speeds[index + 1] - speeds[index]) * frac;
+};
+
+// Calculate swell and surface height for each ocean layer.
+const calculateSwell = (l, px) => (0.6 + weatherFactor * 5) * (0.6 + l * 0.1) * Math.sin(px * 0.02 + wavePhase1 * 0.9 + l * 0.15);
+function calculateSurface(l, px) {
+    const amplitude = (0.8 + weatherFactor * 4.5) * (0.6 + l * 0.17);
+    const frequency = 0.1 - 0.005 * l;
+    const phase = wavePhase1 * (0.6 + l * 0.09) + l * 2.3;
+    return BASE_WAVE_HEIGHTS[l] + calculateSwell(l, px) + amplitude * (Math.sin(px * frequency + phase) + 0.5 * Math.sin(px * frequency * 2.3 + phase * 1.6 + l) + 0.25 * (0.3 + weatherFactor) * Math.sin(px * frequency * 4.7 + phase * 2.5));
+}
+
+let spriteCacheKey = '', wavePhase1 = 0, wavePhase2 = 0, weatherFactor = 0, weatherValue = 2, rainFactor = 0, targetWeatherValue = 2, targetRainFactor = 0, phaseTime = 0, weatherPlan = [], planIndex = 0;
+
+// Rebuild the cached submarine only when its lighting changes.
+function drawSubmarine(ambient, night) {
+    const key = Math.round(ambient * 40) + '_' + Math.round(night * 8);
+    if (key === spriteCacheKey) return;
+    spriteCacheKey = key;
+    spriteCtx.setTransform(1, 0, 0, 1, 0, 0);
+    spriteCtx.clearRect(0, 0, 225, 64);
+    spriteCtx.setTransform(1, 0, 0, 1, 8, 0);
+
+    // Adjust hull materials to match the current ambient light.
+    const hullColor = mixColors([34, 40, 52], [158, 168, 177], ambient);
+    const darkColor = mixColors(hullColor, [16, 22, 34], 0.5);
+    const liteColor = mixColors(mixColors(hullColor, [226, 232, 238], 0.35), [255, 205, 165], 0.15 * ambient);
+    const redColor = mixColors(hullColor, [38, 50, 66], 0.45);
+    const woodColor = mixColors([30, 32, 38], [88, 84, 78], ambient);
+    const midColor = mixColors(hullColor, darkColor, 0.3);
+
+    // Draw a solid pixel block using the selected color.
+    const drawPixel = (c, a, b, w, h) => {
+        spriteCtx.fillStyle = toRgbaCss(c);
+        spriteCtx.fillRect(a, b, w, h);
+    };
+
+    // Draw a thin pixel line between two points.
+    const drawWire = (x0, y0, x1, y1) => {
+        spriteCtx.fillStyle = toRgbaCss(darkColor);
+        for (let i = x0; i <= x1; i++) {
+            spriteCtx.fillRect(i, Math.round(y0 + (y1 - y0) * (i - x0) / (x1 - x0)), 1, 1);
+        }
+    };
+
+    // Build the submarine hull column by column for a pixel-art shape.
+    for (let i = 4; i < 205; i++) {
+        const m = (i - 4) / 3;
+        let top = 40, bot = 58;
+        if (m > 45) top -= 4 * Math.pow((m - 45) / 22.1, 1.8);
+        if (m > 54) bot -= 17 * Math.pow((m - 54) / 13.1, 1.4);
+        if (m < 10) top += 4 * Math.pow((10 - m) / 10, 2);
+        if (m < 8) bot -= 14 * Math.pow((8 - m) / 8, 1.2);
+        top = Math.round(top);
+        bot = Math.round(bot);
+
+        for (let y = top; y < bot; y++) {
+            let c = hullColor;
+            if (y >= top + 8) c = midColor;
+            const dx = (i - 82) / 54;
+            const hh = Math.abs(dx) < 1 ? 5.5 * Math.pow(1 - Math.pow(Math.abs(dx), 2.2), 0.6) : -1;
+            const d = y + 0.5 - 49;
+            const inB = hh > 0 && Math.abs(d) < hh;
+
+            if (inB && y > top + 2) c = Math.abs(d) > hh - 1.2 ? darkColor : (d < -1 ? mixColors(hullColor, liteColor, 0.55) : d > 2 ? mixColors(hullColor, darkColor, 0.25) : hullColor);
+            if (y >= 50) c = y >= bot - 2 ? darkColor : redColor;
+            if (y === 49) c = darkColor;
+            if (y === top) c = woodColor;
+            else if (y === top + 1) c = liteColor;
+            if (m > 7 && m < 60 && !inB && ((y === top + 2 && i % 5 < 3) || (m > 44 && y === top + 5 && i % 7 < 3))) c = darkColor;
+            if (i % 24 === 0 && y > top + 1 && y < 49 && !inB) c = darkColor;
+
+            drawPixel(c, i, y, 1, 1);
+        }
+    }
+
+    drawPixel([62, 128, 160], 176, 41, 10, 3);
+    drawPixel(darkColor, 189, 42, 3, 3);
+    drawPixel(darkColor, 1, 44, 3, 13);
+
+    {
+        const br = mixColors([60, 50, 36], [170, 130, 70], ambient);
+        drawPixel(darkColor, 15, 48, 3, 3);
+        drawPixel(darkColor, 13, 50, 3, 3);
+        drawPixel(br, 11, 46, 3, 5);
+        drawPixel(br, 11, 54, 3, 5);
+        drawPixel(darkColor, 11, 51, 4, 3);
+        drawPixel(liteColor, 11, 46, 1, 2);
+        drawPixel(liteColor, 11, 54, 1, 2);
+    }
+
+    drawPixel(hullColor, 108, 33, 24, 7);
+    drawPixel(liteColor, 108, 33, 24, 1);
+    drawPixel(hullColor, 110, 30, 20, 3);
+    drawPixel(liteColor, 110, 30, 20, 1);
+    drawPixel(darkColor, 109, 29, 22, 1);
+    drawPixel(liteColor, 130, 33, 2, 7);
+
+    // Draw the small hull marking from a compact bitmap font.
+    const glyphs = {'2': [7, 1, 7, 4, 7], '3': [7, 1, 7, 1, 7], '1': [2, 6, 2, 2, 7], '0': [7, 5, 5, 5, 7]};
+    const numColor = mixColors([225, 230, 235], [18, 24, 36], ambient);
+    '2310'.split('').forEach((ch, n) => glyphs[ch].forEach((row, r) => {
+        for (let q = 0; q < 3; q++) {
+            if ((row >> (2 - q)) & 1) drawPixel(numColor, 112 + n * 4 + q, 34 + r, 1, 1);
+        }
+    }));
+
+    drawPixel(hullColor, 91, 37, 17, 3);
+    drawPixel(darkColor, 91, 34, 17, 1);
+    drawPixel(darkColor, 91, 34, 1, 3);
+    drawPixel(darkColor, 99, 34, 1, 3);
+    drawPixel(darkColor, 107, 34, 1, 3);
+    drawPixel(darkColor, 96, 33, 3, 4);
+    drawWire(98, 32, 103, 28);
+    drawPixel(hullColor, 118, 20, 2, 10);
+    drawPixel(darkColor, 117, 19, 4, 1);
+    drawPixel(hullColor, 125, 23, 1, 7);
+    drawPixel(hullColor, 150, 35, 6, 5);
+    drawPixel(darkColor, 151, 33, 3, 3);
+    drawPixel(darkColor, 156, 36, 13, 2);
+    drawWire(118, 19, 205, 36);
+    drawWire(4, 43, 118, 19);
+
+    if (night > 0.3) {
+        drawPixel([255, 210, 120], 128, 31, 2, 2);
+        drawPixel([255, 210, 120], 112, 31, 2, 2);
+    }
+}
+
+// Update simulation state and render one animation frame.
+function renderFrame(now) {
+    // Start the animation loop.
+requestAnimationFrame(renderFrame);
+    const dt = Math.min(0.05, (now - (renderFrame.lastTime || now)) / 1000);
+    renderFrame.lastTime = now;
+
+    // Advance the clock faster while the fast-forward key is held.
+    const simulationSpeed = inputState.fastForward ? 25 : 1;
+    totalTime += dt;
+    timeOfDay += dt / DAY_DURATION * simulationSpeed;
+    if (timeOfDay >= 1) {
+        timeOfDay -= 1;
+        dayCount++;
+    }
+
+    // Move to the next planned weather phase when its timer expires.
+    phaseTime -= dt;
+    if (phaseTime <= 0 || inputState.changeWeather) {
+        inputState.changeWeather = 0;
+        advanceWeather();
+    }
+
+    // Smooth weather changes to avoid sudden jumps in wind and rain.
+    weatherValue += (targetWeatherValue - weatherValue) * dt * 0.2;
+    rainFactor += (targetRainFactor - rainFactor) * dt * 0.2;
+    stormIntensity = clamp(rainFactor * 0.2 + (weatherValue - 1) * 0.1, 0, 1);
+    weatherFactor = (weatherValue - 1) / 4;
+    wavePhase1 += dt * getSpeed(weatherValue);
+    wavePhase2 += dt * (0.7 + weatherFactor * 1.6);
+
+    // Calculate daylight and night intensity from the time of day.
+    const e = Math.sin((timeOfDay - 0.25) * Math.PI * 2);
+    const ambient = 0.35 + 0.65 * clamp(e * 2.5 + 0.2, 0, 1);
+    const night = clamp(0.5 - e * 3, 0, 1);
+
+    // Prepare sky, storm, and water colors for this frame.
+    let skyColors = getSkyColors(timeOfDay);
+    const getLuminance = c => 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+    const getGrayscale = l => [l * 0.8 + 8, l * 0.85 + 10, l + 14];
+
+    const skyTop = mixColors(skyColors.top, getGrayscale(getLuminance(skyColors.top)), stormIntensity * 0.7);
+    const skyBot = mixColors(skyColors.bot, getGrayscale(getLuminance(skyColors.bot)), stormIntensity * 0.8);
+    const deepWater = mixColors(skyTop, [8, 14, 40], 0.55);
+    const dimWater = mixColors(skyBot, skyTop, 0.35);
+
+    // Paint the sky with a vertical color gradient.
+    let gradient = ctx.createLinearGradient(0, 0, 0, HORIZON);
+    gradient.addColorStop(0, toRgbaCss(skyTop));
+    gradient.addColorStop(1, toRgbaCss(skyBot));
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvasWidth, HORIZON + 1);
+
+    // Show stars only when the sky is dark and the storm is not too strong.
+    if (night * (1 - stormIntensity) > 0.05) {
+        ctx.fillStyle = '#fff';
+        for (let i = 0; i < stars.length; i++) {
+            ctx.globalAlpha = night * (1 - stormIntensity) * (0.4 + 0.6 * pseudoRandom(i, Math.floor(totalTime * 1.5), 2));
+            ctx.fillRect(stars[i][0] % canvasWidth | 0, stars[i][1] | 0, 1, 1);
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    // Draw the sun or moon, including its soft glow and pixelated disc.
+    const drawCelestial = (u, r, col, al) => {
+        const bx = canvasWidth * (0.5 - 0.4 * Math.cos(u * Math.PI));
+        const by = HORIZON - Math.sin(u * Math.PI) * 76;
+        if (by > HORIZON + 12 || al <= 0) return null;
+        const gg = ctx.createRadialGradient(bx, by, 0, bx, by, r * 6);
+        gg.addColorStop(0, toRgbaCss(col, 0.55 * al));
+        gg.addColorStop(1, toRgbaCss(col, 0));
+        ctx.fillStyle = gg;
+        ctx.fillRect(bx - r * 6, by - r * 6, r * 12, r * 12);
+        ctx.fillStyle = toRgbaCss(col, al);
+        for (let dy = -r; dy <= r; dy++) {
+            const w = Math.round(Math.sqrt(r * r - dy * dy));
+            ctx.fillRect(Math.round(bx) - w, Math.round(by) + dy, w * 2, 1);
+        }
+        return [bx, by];
+    };
+
+    const sunColor = mixColors([255, 160, 100], [255, 245, 205], clamp(e * 2, 0, 1));
+    const sunPos = drawCelestial(((timeOfDay - 0.25 + 1) % 1) / 0.5, 7, sunColor, 1 - stormIntensity * 0.9);
+    const moonProgress = ((timeOfDay - 0.75 + 1) % 1) / 0.5;
+    const moonPos = drawCelestial(moonProgress, 5, [225, 230, 245], (1 - stormIntensity * 0.9) * night);
+
+    if (moonPos) {
+        ctx.fillStyle = toRgbaCss(skyTop);
+        ctx.beginPath();
+        ctx.arc(moonPos[0] + 3, moonPos[1] - 1, 4.5, 0, 7);
+        ctx.fill();
+    }
+
+    // Move and shade the clouds according to the current weather.
+    const cloudList = [...clouds];
+    const cloudCount = 6 + stormIntensity * 12;
+    cloudList.forEach((q, i) => {
+        const al = clamp(cloudCount - i, 0, 1);
+        if (!al) return;
+        q.x -= dt * 5 * q.speed * (1 + weatherFactor * 5);
+        if (q.x > canvasWidth + 80) q.x = -90;
+
+        const lt = mixColors(mixColors(skyBot, [255, 255, 255], 0.3 + 0.2 * ambient), [90, 95, 110], stormIntensity * 0.6);
+        const sh = mixColors(mixColors(skyTop, skyBot, 0.3), [40, 42, 55], stormIntensity * 0.5);
+        const w = 60 * q.scale;
+        const yy = q.y + stormIntensity * 14;
+
+        ctx.globalAlpha = al * (0.55 + 0.45 * stormIntensity);
+        for (let j = 0; j < 8; j++) {
+            const bh = Math.round((5 + pseudoRandom(i, j, 7) * 8) * q.scale * Math.sin((j + 0.5) / 8 * Math.PI) + 2);
+            const bx = Math.round(q.x + j * w / 8);
+            ctx.fillStyle = toRgbaCss(lt);
+            ctx.fillRect(bx, yy - bh, Math.ceil(w / 8) + 1, bh);
+            ctx.fillStyle = toRgbaCss(sh);
+            ctx.fillRect(bx, yy - Math.round(bh * 0.4), Math.ceil(w / 8) + 1, Math.round(bh * 0.4));
+        }
+    });
+    ctx.globalAlpha = 1;
+
+    // Fill the water background before drawing the animated wave layers.
+    gradient = ctx.createLinearGradient(0, HORIZON, 0, BASE_HEIGHT);
+    gradient.addColorStop(0, toRgbaCss(dimWater));
+    gradient.addColorStop(1, toRgbaCss(deepWater));
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, HORIZON, canvasWidth, BASE_HEIGHT - HORIZON);
+
+    // Add broken pixel reflections beneath the sun and moon.
+    const renderReflection = (l, col, st) => {
+        if (st <= 0.02) return;
+        for (let y = HORIZON; y < BASE_HEIGHT; y += 2) {
+            const dy = y - HORIZON, w = 5 + dy * 0.3;
+            for (let px = (col[2] - w) | 0; px < col[2] + w; px += 2) {
+                if (y < calculateSurface(l, px)) continue;
+                const p = (1 - Math.abs(px - col[2]) / w) * (1 - dy / (BASE_HEIGHT - HORIZON)) * st;
+                if (pseudoRandom(px, y, Math.floor(totalTime * 3)) < p * 0.55) {
+                    ctx.fillStyle = toRgbaCss(col[0], 0.85);
+                    ctx.fillRect(px, y, 2, 1);
+                }
+            }
+        }
+    };
+
+    const refSun = sunPos ? [sunColor, 0, sunPos[0]] : null;
+    const refMoon = moonPos ? [[225, 230, 245], 0, moonPos[0]] : null;
+    const refSunStr = clamp(e * 4, 0, 1) * (1 - stormIntensity * 0.85);
+    const refMoonStr = night * (1 - stormIntensity) * 0.7;
+
+    // Render one wave layer; farther layers are drawn first.
+    const renderLayer = l => {
+        const col = mixColors(dimWater, deepWater, 0.08 + 0.055 * l);
+        const cr = mixColors(col, skyBot, 0.5);
+        for (let px = 0; px < canvasWidth; px++) {
+            const ys = Math.round(calculateSurface(l, px));
+            ctx.fillStyle = toRgbaCss(col);
+            ctx.fillRect(px, ys, 1, BASE_HEIGHT - ys);
+            ctx.fillStyle = toRgbaCss(cr);
+            ctx.fillRect(px, ys, 1, 1);
+            if (l < 15 && pseudoRandom(px, l, Math.floor(totalTime * 5)) < clamp(rainFactor - 0.4, 0, 3) * 0.1) {
+                ctx.fillStyle = toRgbaCss([235, 240, 250], 0.8);
+                ctx.fillRect(px, ys - 1, 1, 1);
+            }
+        }
+        if (refSun) renderReflection(l, refSun, refSunStr);
+        if (refMoon) renderReflection(l, refMoon, refMoonStr);
+    };
+
+    // Draw the distant water layers behind the submarine.
+    renderLayer(0);
+    renderLayer(1);
+    renderLayer(2);
+
+    // Let the submarine bob and tilt with the surface swell.
+    const subX = canvasWidth * 0.5 + weatherFactor * 5 * Math.sin(wavePhase2 * 0.6);
+    const subY1 = BASE_WAVE_HEIGHTS[3] + calculateSwell(3, subX);
+    const subAngle = Math.atan2(calculateSwell(3, subX + 70) - calculateSwell(3, subX - 70), 140) * 1.5 + weatherFactor * (0.09 * Math.sin(wavePhase2 * 0.85 + 0.5) + 0.04 * Math.sin(wavePhase2 * 1.9));
+    const subRealY = subY1 + 3 + weatherFactor * 6 + weatherFactor * (4 * Math.sin(wavePhase2 * 0.85) + 2 * Math.sin(wavePhase2 * 2.1 + 1));
+
+    // Draw the cached submarine sprite at its current position and angle.
+    drawSubmarine(ambient, night);
+    ctx.save();
+    ctx.translate(subX, subRealY);
+    ctx.rotate(subAngle);
+    ctx.drawImage(spriteCanvas, -116, -50);
+    ctx.restore();
+
+    // Add the nearby water layer in front of the submarine.
+    renderLayer(3);
+    const glowAlpha = 0.4 * (1 - stormIntensity) * clamp((ambient - 0.35) / 0.65, 0, 1);
+    if (glowAlpha > 0.01) {
+        ctx.save();
+        ctx.translate(subX, subRealY);
+        ctx.rotate(subAngle);
+        ctx.beginPath();
+        ctx.rect(-116, -6, 225, 26);
+        ctx.clip();
+        ctx.globalAlpha = glowAlpha;
+        ctx.drawImage(spriteCanvas, -116, -50);
+        ctx.restore();
+    }
+
+    // Add small splashes around the submarine during rain.
+    if (rainFactor > 0.5) {
+        for (let i = 0; i < rainFactor * 23; i++) {
+            const px = subX - 100 + pseudoRandom(i, Math.floor(totalTime * 5), 5) * 200;
+            const yy = calculateSurface(3, px) - (pseudoRandom(i, 7, Math.floor(totalTime * 5)) * 3 | 0);
+            ctx.fillStyle = toRgbaCss([240, 245, 255], 0.85);
+            ctx.fillRect(px | 0, yy | 0, 1, 1);
+        }
+    }
+
+    // Draw the short wake trailing behind the submarine.
+    for (let i = 0; i < 26; i++) {
+        const px = subX - 112 - i * 3.5;
+        const yy = calculateSurface(3, px) - (pseudoRandom(i, Math.floor(totalTime * 6), 1) * 2 | 0);
+        if (pseudoRandom(i, Math.floor(totalTime * 4), 9) < 0.75) {
+            ctx.fillStyle = toRgbaCss([240, 245, 255], 1 - i / 26);
+            ctx.fillRect(px | 0, yy | 0, 2, 1);
+        }
+    }
+
+    for (let i = 0; i < 8; i++) {
+        const px = subX + 98 + i * 2;
+        const yy = calculateSurface(3, px) - pseudoRandom(i, Math.floor(totalTime * 8), 3) * 3;
+        ctx.fillStyle = toRgbaCss([240, 245, 255], 0.8 - i / 10);
+        ctx.fillRect(px | 0, yy | 0, 1, 1);
+    }
+
+    // Draw the remaining foreground waves over the submarine.
+    for (let l = 4; l < 16; l++) renderLayer(l);
+
+    // Apply a dark storm tint and choose rain density from its intensity.
+    const rainLevel = rainFactor < 0.5 ? 0 : rainFactor < 1.5 ? 1 : rainFactor < 2.5 ? 2 : 3;
+    ctx.fillStyle = toRgbaCss([8, 12, 22], stormIntensity * 0.25);
+    ctx.fillRect(0, 0, canvasWidth, BASE_HEIGHT);
+
+    // Render rain streaks with heavier density and longer drops in stronger rain.
+    if (rainLevel) {
+        const count = [0, 90, 240, 520][rainLevel];
+        const length = [0, 3, 4, 6][rainLevel];
+        const slope = [0, 0.15, 0.3, 0.5][rainLevel];
+        const speed = [0, 190, 250, 340][rainLevel];
+        const halfLength = length >> 1;
+        ctx.fillStyle = toRgbaCss([200, 212, 235], [0, 0.35, 0.45, 0.6][rainLevel]);
+        for (let i = 0; i < count; i++) {
+            const y = (pseudoRandom(i, 1, 0) * BASE_HEIGHT + totalTime * (speed + pseudoRandom(i, 2, 0) * 60)) % BASE_HEIGHT;
+            const px = (pseudoRandom(i, 0, 0) * (canvasWidth + 120) - y * slope + canvasWidth) % canvasWidth | 0;
+            ctx.fillRect(px, y | 0, 1, halfLength);
+            ctx.fillRect(px - (rainLevel > 1 ? 1 : 0), (y | 0) + halfLength, 1, length - halfLength);
+        }
+    }
+
+    // Trigger occasional lightning during intense storms.
+    if (rainFactor > 2.3 && lightningFlash <= 0 && Math.random() < dt * 0.15) {
+        lightningFlash = 1;
+        lightningX = canvasWidth * (0.1 + Math.random() * 0.8);
+    }
+
+    // Draw the lightning flash and its jagged bolt, then fade it out.
+    if (lightningFlash > 0) {
+        ctx.fillStyle = toRgbaCss([220, 230, 255], lightningFlash * 0.45);
+        ctx.fillRect(0, 0, canvasWidth, BASE_HEIGHT);
+        if (lightningFlash > 0.5) {
+            ctx.fillStyle = '#fff';
+            let bx = lightningX;
+            for (let y = 0; y < HORIZON + 10; y += 4) {
+                bx += (pseudoRandom(y, lightningX, 1) - 0.5) * 8;
+                ctx.fillRect(bx | 0, y, 1, 5);
+            }
+        }
+        lightningFlash -= dt * 2.5;
+    }
+
+    // Slightly darken the full scene when ambient light is low.
+    const darkOverlay = clamp(0.35 - ambient * 0.35, 0, 0.3);
+    if (darkOverlay > 0) {
+        ctx.fillStyle = toRgbaCss([5, 8, 30], darkOverlay * 0.5);
+        ctx.fillRect(0, 0, canvasWidth, BASE_HEIGHT);
+    }
+}
+
+const inputState = { fastForward: 0, changeWeather: 0 };
+
+// Create a short sequence of weather phases with varied intensity.
+function generateWeatherPlan() {
+    const rand = Math.random();
+    const makeStep = (r, w, d) => ({ r: r, w: w, d: d });
+    const q = () => 18 + Math.random() * 10;
+    if (rand < 0.3) {
+        weatherPlan = [makeStep(1, 3, q()), makeStep(2, 4, q()), makeStep(1, 3, q())];
+    } else if (rand < 0.55) {
+        weatherPlan = [makeStep(1, 3, q()), makeStep(2, 4, q()), makeStep(3, 5, q()), makeStep(2, 4, q()), makeStep(1, 3, q())];
+    } else {
+        weatherPlan = [];
+        let lv = Math.min(4, Math.round(targetWeatherValue));
+        for (let i = 0, n = 2 + (Math.random() * 3 | 0); i < n; i++) {
+            lv = clamp(lv + [-1, 0, 1][Math.random() * 3 | 0], 1, 4);
+            weatherPlan.push(makeStep(0, lv, 20 + Math.random() * 20));
+        }
+    }
+    planIndex = 0;
+}
+
+// Apply the next phase from the generated weather plan.
+function advanceWeather() {
+    if (planIndex >= weatherPlan.length) generateWeatherPlan();
+    const p = weatherPlan[planIndex++];
+    targetRainFactor = p.r;
+    targetWeatherValue = p.w;
+    phaseTime = p.d;
+}
+
+generateWeatherPlan();
+
+// Keyboard controls: hold T to speed up time and press W to change weather.
+addEventListener('keydown', event => {
+    const key = event.key.toLowerCase();
+    if (key === 't') inputState.fastForward = 1;
+    if (key === 'w') inputState.changeWeather = 1;
+});
+
+addEventListener('keyup', event => {
+    if (event.key.toLowerCase() === 't') inputState.fastForward = 0;
+});
+
+requestAnimationFrame(renderFrame);
+</script>
+</body>
+</html>
