@@ -24,10 +24,17 @@ A lightweight, zero-dependency web simulation written in vanilla JavaScript and 
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/yufurkan/pixel-submarine-2310.git](https://github.com/yufurkan/pixel-submarine-2310.git)
+   git clone https://github.com/yufurkan/pixel-submarine-2310.git
     ```
 
-Open index.html in any modern web browser. (No build tools or local servers required!) 
+2. Install the Lively Wallpaper application.
+Package the folder containing the files from this repository as a .zip file (or download the ready-made package from the Releases section).
+
+3. Drag and drop the .zip file into the Lively window.
+
+4. Select the wallpaper from the library.
+
+Note: It is recommended that the package also include the files `LivelyInfo.json`, `thumbnail.jpg`, and `preview.gif` for Lively.
 
 Performance: Optimized requestAnimationFrame loop with dynamic sprite caching to maintain a steady 60 FPS.
 

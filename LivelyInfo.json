@@ -1,0 +1,15 @@
+{
+  "AppVersion": "2.2.0.0",
+  "Title": "Pixel Submarine",
+  "Thumbnail": "thumbnail.jpg",
+  "Preview": "preview.gif",
+  "Desc": "Procedural pixel-art Type VIIC submarine with day-night cycle, parallax ocean, rain and lightning storms.",
+  "Author": "Yusuf Furkan Umutlu",
+  "License": "MIT",
+  "Contact": "https://github.com/yufurkan/pixel-submarine_Wallpaper",
+  "Type": 1,
+  "FileName": "2310.html",
+  "Arguments": null,
+  "IsAbsolutePath": false,
+  "Tags": ["pixel", "submarine", "ocean", "procedural", "canvas"]
+}
